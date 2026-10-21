@@ -1,0 +1,72 @@
+name: Rendre une vidéo
+
+on:
+  workflow_dispatch:
+    inputs:
+      video:
+        description: "Nom du dossier dans videos/ (ex : test-eau)"
+        required: true
+        default: test-eau
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      VIDEO: ${{ inputs.video }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vérifier le nom de la vidéo
+        run: |
+          if ! [[ "$VIDEO" =~ ^[a-zA-Z0-9-]+$ ]]; then
+            echo "::error::Nom invalide '$VIDEO' (lettres, chiffres et tirets uniquement)"; exit 1
+          fi
+          for f in script.txt scene.tsx; do
+            if [ ! -f "videos/$VIDEO/$f" ]; then
+              echo "::error::videos/$VIDEO/$f introuvable"; exit 1
+            fi
+          done
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Installer les dépendances
+        run: |
+          pip install -r requirements.txt
+          npm ci
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 libdbus-1-3 libatk1.0-0 libgbm-dev libasound2t64 libxrandr2 \
+            libxkbcommon-dev libxfixes3 libxcomposite1 libxdamage1 libatk-bridge2.0-0 \
+            libpango-1.0-0 libcairo2 libcups2
+          npx remotion browser ensure
+
+      - name: Générer la voix off (edge-tts, WordBoundary)
+        run: |
+          for i in 1 2 3; do
+            python scripts/tts.py "$VIDEO" && break
+            echo "Échec edge-tts (tentative $i), nouvel essai..."; sleep 5
+            [ "$i" = 3 ] && exit 1
+          done
+          echo "### Timing des mots" >> "$GITHUB_STEP_SUMMARY"
+          python -c "import json;t=json.load(open('public/voice/$VIDEO/timing.json'));print(len(t['words']),'mots,',t['durationInSeconds'],'s')" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rendre la vidéo (Remotion, swangle)
+        run: npx remotion render src/index.ts "$VIDEO" "out/$VIDEO.mp4" --gl=swangle --codec=h264
+
+      - name: Publier le MP4
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.video }}
+          path: |
+            out/${{ inputs.video }}.mp4
+            public/voice/${{ inputs.video }}/timing.json
+          retention-days: 14
